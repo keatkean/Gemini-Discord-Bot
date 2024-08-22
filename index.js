@@ -16,6 +16,7 @@ import {
   AttachmentBuilder,
   ActivityType,
   StringSelectMenuBuilder,
+  ComponentType,
   REST,
   Routes,
 } from 'discord.js';
@@ -29,7 +30,7 @@ import { writeFile, unlink } from 'fs/promises';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import pdf from 'pdf-parse';
+import { getTextExtractor } from 'office-text-extractor'
 import * as cheerio from 'cheerio';
 import osu from 'node-os-utils';
 const { mem } = osu;
@@ -71,7 +72,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const CONFIG_DIR = path.join(__dirname, 'config');
-const CHAT_HISTORIES_DIR = path.join(CONFIG_DIR, 'chat_histories_2');
+const CHAT_HISTORIES_DIR = path.join(CONFIG_DIR, 'chat_histories_3');
 
 const FILE_PATHS = {
   activeUsersInChannels: path.join(CONFIG_DIR, 'active_users_in_channels.json'),
@@ -451,7 +452,50 @@ async function handleButtonInteraction(interaction) {
       } else {
         await handler(interaction);
       }
-      break;
+      return;
+    }
+  }
+
+  if (interaction.customId.startsWith('delete_message-')) {
+    const msgId = interaction.customId.replace('delete_message-', '');
+    await handleDeleteMessageInteraction(interaction, msgId);
+  }
+}
+
+async function handleDeleteMessageInteraction(interaction, msgId) {
+  const userId = interaction.user.id;
+  const userChatHistory = chatHistories[userId];
+  const channel = interaction.channel;
+  const message = channel ? (await channel.messages.fetch(msgId).catch(() => false)) : false;
+
+  if (userChatHistory) {
+    if (userChatHistory[msgId]) {
+      delete userChatHistory[msgId];
+      await deleteMsg();
+    } else {
+      try {
+        const replyingTo = message ? (message.reference ? (await message.channel.messages.fetch(message.reference.messageId)).author.id : 0) : 0;
+        if (userId === replyingTo) {
+          await deleteMsg();
+        } else {
+          const embed = new EmbedBuilder()
+            .setColor(0xFF0000)
+            .setTitle('Not For You')
+            .setDescription('This button is not meant for you.');
+          return interaction.reply({ embeds: [embed], ephemeral: true });
+        }
+      } catch (error) {}
+    }
+  }
+
+  async function deleteMsg() {
+    await interaction.message.delete()
+      .catch('Error deleting interaction message: ', console.error);
+    
+    if (channel) {
+      if (message) {
+        message.delete().catch(() => {});
+      }
     }
   }
 }
@@ -634,7 +678,7 @@ async function handleTextMessage(message) {
 
 function hasSupportedAttachments(message) {
   const supportedFileExtensions = [
-    'html', 'js', 'css', 'json', 'xml', 'csv', 'py', 'java', 'sql', 'log', 'md', 'txt', 'pdf'
+    'html', 'js', 'css', 'json', 'xml', 'csv', 'py', 'java', 'sql', 'log', 'md', 'txt', 'pdf', 'docx'
   ];
 
   return message.attachments.some((attachment) => {
@@ -743,7 +787,7 @@ async function extractFileText(message, messageContent) {
     let attachments = Array.from(message.attachments.values());
     for (const attachment of attachments) {
       const fileType = attachment.name.split('.').pop().toLowerCase();
-      const fileTypes = ['html', 'js', 'css', 'json', 'xml', 'csv', 'py', 'java', 'sql', 'log', 'md', 'txt', 'pdf'];
+      const fileTypes = ['html', 'js', 'css', 'json', 'xml', 'csv', 'py', 'java', 'sql', 'log', 'md', 'txt', 'pdf', 'docx'];
 
       if (fileTypes.includes(fileType)) {
         try {
@@ -764,8 +808,10 @@ async function downloadAndReadFile(url, fileType) {
 
   switch (fileType) {
     case 'pdf':
+    case 'docx':
       let buffer = await response.arrayBuffer();
-      return (await pdf(buffer)).text;
+      const extractor = getTextExtractor();
+      return (await extractor.extractText({ input: buffer, type: 'buffer' }));
     default:
       return await response.text();
   }
@@ -1497,7 +1543,7 @@ async function generateMusicWithPrompt(prompt, userId) {
 
 async function clearChatHistory(interaction) {
   try {
-    chatHistories[interaction.user.id] = [];
+    chatHistories[interaction.user.id] = {};
     const embed = new EmbedBuilder()
       .setColor(0x00FF00)
       .setTitle('Chat History Cleared')
@@ -1829,18 +1875,17 @@ async function downloadMessage(interaction) {
 
     const attachment = new AttachmentBuilder(filePath, { name: 'message_content.txt' });
 
+    const initialEmbed = new EmbedBuilder()
+      .setColor(0xFFFFFF)
+      .setTitle('Message Content Downloaded')
+      .setDescription(`Here is the content of the message.`);
+
+    let response;
     if (interaction.channel.type === ChannelType.DM) {
-      const dmContentEmbed = new EmbedBuilder()
-        .setColor(0xFFFFFF)
-        .setTitle('Message Content Downloaded')
-        .setDescription('Here is the content of the message.');
-      await interaction.reply({ embeds: [dmContentEmbed], files: [attachment] });
+      response = await interaction.reply({ embeds: [initialEmbed], files: [attachment], fetchReply: true });
     } else {
       try {
-        await interaction.user.send({
-          content: 'Here is the content of the message:',
-          files: [attachment]
-        });
+        response = await interaction.user.send({ embeds: [initialEmbed], files: [attachment] });
         const dmSentEmbed = new EmbedBuilder()
           .setColor(0x00FF00)
           .setTitle('Content Sent')
@@ -1852,20 +1897,47 @@ async function downloadMessage(interaction) {
           .setColor(0xFF0000)
           .setTitle('Delivery Failed')
           .setDescription('Failed to send the content to your DMs.');
-        await interaction.reply({ embeds: [failDMEmbed], files: [attachment], ephemeral: true });
+        response = await interaction.reply({ embeds: [failDMEmbed], files: [attachment], ephemeral: true, fetchReply: true });
       }
     }
 
-    fs.unlinkSync(filePath); // Clean up the temp file.
+    fs.unlinkSync(filePath);
+
+    const msgUrl = await uploadText(textContent);
+    const updatedEmbed = EmbedBuilder.from(response.embeds[0])
+      .setDescription(`Here is the content of the message.\n${msgUrl}`);
+
+    if (interaction.channel.type === ChannelType.DM) {
+      await interaction.editReply({ embeds: [updatedEmbed] });
+    } else {
+      await response.edit({ embeds: [updatedEmbed] });
+    }
+
   } catch (error) {
-    console.log(`Failed to process download: ${error.message}`);
+    console.log('Failed to process download: ', error);
   }
 }
+
+const uploadText = async (text) => {
+  const siteUrl = 'http://bin.shortbin.eu:8080';
+  try {
+    const response = await axios.post(`${siteUrl}/documents`, text, {
+      headers: { 'Content-Type': 'text/plain' },
+      timeout: 3000
+    });
+
+    const key = response.data.key;
+    return `\nURL: ${siteUrl}/${key}`;
+  } catch (error) {
+    console.log(error);
+    return '\nURL Error :(';
+  }
+};
 
 async function downloadConversation(interaction) {
   try {
     const userId = interaction.user.id;
-    const conversationHistory = chatHistories[userId];
+    const conversationHistory = getHistory(userId);
 
     if (!conversationHistory || conversationHistory.length === 0) {
       const noHistoryEmbed = new EmbedBuilder()
@@ -1879,7 +1951,7 @@ async function downloadConversation(interaction) {
     let conversationText = '';
     for (let i = 0; i < conversationHistory.length; i++) {
       const role = conversationHistory[i].role === 'user' ? '[User]' : '[Model]';
-      const content = conversationHistory[i].content.map(c => c.text).join('\n');
+      const content = conversationHistory[i].parts.map(c => c.text).join('\n');
       conversationText += `${role}:\n${content}\n\n`;
     }
 
@@ -2103,7 +2175,7 @@ async function clearServerChatHistory(interaction) {
 
     if (serverSettings[serverId].serverChatHistory) {
       // Clear the server-wide chat history if it's enabled
-      chatHistories[serverId] = [];
+      chatHistories[serverId] = {};
       const clearedEmbed = new EmbedBuilder()
         .setColor(0x00FF00)
         .setTitle('Chat History Cleared')
@@ -2125,7 +2197,7 @@ async function clearServerChatHistory(interaction) {
 async function downloadServerConversation(interaction) {
   try {
     const guildId = interaction.guild.id;
-    const conversationHistory = chatHistories[guildId];
+    const conversationHistory = getHistory(guildId);
 
     if (!conversationHistory || conversationHistory.length === 0) {
       const noHistoryEmbed = new EmbedBuilder()
@@ -2139,7 +2211,7 @@ async function downloadServerConversation(interaction) {
     let conversationText = '';
     for (let i = 0; i < conversationHistory.length; i++) {
       const role = conversationHistory[i].role === 'user' ? '[User]' : '[Model]';
-      const content = conversationHistory[i].content.map(c => c.text).join('\n');
+      const content = conversationHistory[i].parts.map(c => c.text).join('\n');
       conversationText += `${role}:\n${content}\n\n`;
     }
 
@@ -2410,21 +2482,49 @@ async function showDashboard(interaction) {
 
 async function addDownloadButton(botMessage) {
   try {
-    const settingsButton = new ButtonBuilder()
-      .setCustomId('settings')
-      .setEmoji('⚙️')
-      .setStyle(ButtonStyle.Secondary);
-
+    const messageComponents = botMessage.components || [];
     const downloadButton = new ButtonBuilder()
       .setCustomId('download_message')
       .setLabel('Save')
       .setEmoji('⬇️')
       .setStyle(ButtonStyle.Secondary);
 
-    const actionRow = new ActionRowBuilder().addComponents(settingsButton, downloadButton);
-    await botMessage.edit({ components: [actionRow] });
+    let actionRow;
+    if (messageComponents.length > 0 && messageComponents[0].type === ComponentType.ActionRow) {
+      actionRow = ActionRowBuilder.from(messageComponents[0]);
+    } else {
+      actionRow = new ActionRowBuilder();
+    }
+
+    actionRow.addComponents(downloadButton);
+    return await botMessage.edit({ components: [actionRow] });
   } catch (error) {
-    console.log(error.message);
+    console.error('Error adding download button:', error.message);
+    return botMessage;
+  }
+}
+
+async function addDeleteButton(botMessage, msgId) {
+  try {
+    const messageComponents = botMessage.components || [];
+    const downloadButton = new ButtonBuilder()
+      .setCustomId(`delete_message-${msgId}`)
+      .setLabel('Delete')
+      .setEmoji('🗑️')
+      .setStyle(ButtonStyle.Secondary);
+
+    let actionRow;
+    if (messageComponents.length > 0 && messageComponents[0].type === ComponentType.ActionRow) {
+      actionRow = ActionRowBuilder.from(messageComponents[0]);
+    } else {
+      actionRow = new ActionRowBuilder();
+    }
+
+    actionRow.addComponents(downloadButton);
+    return await botMessage.edit({ components: [actionRow] });
+  } catch (error) {
+    console.error('Error adding delete button:', error.message);
+    return botMessage;
   }
 }
 
@@ -2436,9 +2536,10 @@ async function addSettingsButton(botMessage) {
       .setStyle(ButtonStyle.Secondary);
 
     const actionRow = new ActionRowBuilder().addComponents(settingsButton);
-    await botMessage.edit({ components: [actionRow] });
+    return await botMessage.edit({ components: [actionRow] });
   } catch (error) {
-    console.log(error.message);
+    console.log('Error adding settings button:', error.message);
+    return botMessage;
   }
 }
 
@@ -2557,7 +2658,7 @@ async function handleModelResponse(initialBotMessage, chat, parts, originalMessa
               }));
             }
             const modelParts = convertArrayFormat(toolCalls);
-            newHistory.push({ role: 'model', content: modelParts });
+            newHistory.push({ role: 'assistant', content: modelParts });
             const toolCallsResults = [];
             for (const toolCall of toolCalls) {
               const result = await manageToolCall(toolCall);
@@ -2585,25 +2686,27 @@ async function handleModelResponse(initialBotMessage, chat, parts, originalMessa
       }
       await getResponse(parts);
 
+      botMessage = await addSettingsButton(botMessage);
       if (isLargeResponse) {
-        sendAsTextFile(finalResponse, originalMessage);
-        await addSettingsButton(botMessage);
+        sendAsTextFile(finalResponse, originalMessage, botMessage.id);
+        botMessage = await addDeleteButton(botMessage, botMessage.id);
       } else {
         const shouldAddDownloadButton = originalMessage.guild ? serverSettings[originalMessage.guild.id]?.settingsSaveButton : true;
         if (shouldAddDownloadButton) {
-          await addDownloadButton(botMessage);
+          botMessage = await addDownloadButton(botMessage);
+          botMessage = await addDeleteButton(botMessage, botMessage.id);
         } else {
           botMessage.edit({ components: [] });
         }
       }
-      newHistory.push({ role: 'model', content: [{ text: finalResponse }] });
-      updateChatHistory(historyId, newHistory);
+      newHistory.push({ role: 'assistant', content: [{ text: finalResponse }] });
+      updateChatHistory(historyId, newHistory, botMessage.id);
       break;
     } catch (error) {
       if (activeRequests.has(userId)) {
         activeRequests.delete(userId);
       }
-      console.error(error);
+      console.error('Generation Attempt Failed: ', error);
       attempts--;
 
       if (attempts === 0 || stopGeneration) {
@@ -2633,7 +2736,7 @@ async function handleModelResponse(initialBotMessage, chat, parts, originalMessa
           embeds: [new EmbedBuilder()
             .setColor(0xFFFF00)
             .setTitle('Retry in Progress')
-            .setDescription(`Generation Attempts Failed, Retrying..\n\`\`\`${error.message}\`\`\``)]
+            .setDescription(`Generation Attempt(s) Failed, Retrying..\n\`\`\`${error.message}\`\`\``)]
         });
         setTimeout(() => errorMsg.delete().catch(console.error), 5000);
         await delay(500);
@@ -2669,13 +2772,14 @@ function updateEmbed(botMessage, finalResponse, message, functionCallsString) {
   }
 }
 
-async function sendAsTextFile(text, message) {
+async function sendAsTextFile(text, message, orgId) {
   try {
     const filename = `response-${Date.now()}.txt`;
     await writeFile(filename, text);
 
     const botMessage = await message.channel.send({ content: `<@${message.author.id}>, Here is the response:`, files: [filename] });
     await addSettingsButton(botMessage);
+    await addDeleteButton(botMessage, orgId);
 
     // Cleanup: Remove the file after sending it
     await unlink(filename);
@@ -2685,8 +2789,16 @@ async function sendAsTextFile(text, message) {
 }
 
 function getHistory(id) {
-  const history = chatHistories[id] || [];
-  return history.map(entry => {
+  const historyObject = chatHistories[id] || {};
+  let combinedHistory = [];
+
+  for (const messagesId in historyObject) {
+    if (historyObject.hasOwnProperty(messagesId)) {
+      combinedHistory = [...combinedHistory, ...historyObject[messagesId]];
+    }
+  }
+
+  return combinedHistory.map(entry => {
     return {
       role: entry.role === 'assistant' ? 'model' : entry.role,
       parts: entry.content
@@ -2694,12 +2806,16 @@ function getHistory(id) {
   });
 }
 
-function updateChatHistory(id, newHistory) {
+function updateChatHistory(id, newHistory, messagesId) {
   if (!chatHistories[id]) {
-    chatHistories[id] = [];
+    chatHistories[id] = {};
   }
 
-  chatHistories[id] = [...chatHistories[id], ...newHistory];
+  if (!chatHistories[id][messagesId]) {
+    chatHistories[id][messagesId] = [];
+  }
+
+  chatHistories[id][messagesId] = [...chatHistories[id][messagesId], ...newHistory];
 }
 
 // <==========>
