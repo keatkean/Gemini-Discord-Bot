@@ -204,19 +204,19 @@ const MODEL = "gemini-1.5-flash-latest";
 const safetySettings = [
   {
     category: HarmCategory.HARM_CATEGORY_HARASSMENT,
-    threshold: HarmBlockThreshold.BLOCK_NONE,
+    threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
   },
   {
     category: HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-    threshold: HarmBlockThreshold.BLOCK_NONE,
+    threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
   },
   {
     category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-    threshold: HarmBlockThreshold.BLOCK_NONE,
+    threshold: HarmBlockThreshold.BLOCK_LOW_AND_ABOVE,
   },
   {
     category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-    threshold: HarmBlockThreshold.BLOCK_NONE,
+    threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
   },
 ];
 
@@ -614,10 +614,12 @@ async function handleTextMessage(message) {
   const isChannelChatHistoryEnabled = guildId ? channelWideChatHistory[channelId] : false;
   const finalInstructions = isServerChatHistoryEnabled ? instructions + infoStr : instructions;
   const historyId = isChannelChatHistoryEnabled ? (isServerChatHistoryEnabled ? guildId : channelId) : userId;
-
+  console.log('Final Instructions:', defaultPersonality+instructions+infoStr);
   const model = await genAI.getGenerativeModel({
     model: MODEL,
-    systemInstruction: { role: "system", parts: [{ text: finalInstructions || defaultPersonality }] },
+    //systemInstruction: { role: "system", parts: [{ text: finalInstructions || defaultPersonality }] },
+    systemInstruction: { role: "system", parts: [{ text: defaultPersonality+instructions+infoStr }] },
+    contents: parts,
     generationConfig,
     tools: { functionDeclarations: function_declarations }
   });
