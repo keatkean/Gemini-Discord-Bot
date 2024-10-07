@@ -150,8 +150,8 @@ function loadStateFromFile() {
 
 function removeFileData(chatHistories) {
   try {
-    Object.values(chatHistories).forEach(conversations => {
-      conversations.forEach(message => {
+    Object.values(chatHistories).forEach(subIdEntries => {
+      subIdEntries.forEach(message => {
         if (message.content) {
           message.content = message.content.filter(contentItem => {
             if (contentItem.fileData) {
@@ -677,14 +677,17 @@ async function handleTextMessage(message) {
 }
 
 function hasSupportedAttachments(message) {
-  const supportedFileExtensions = [
-    'html', 'js', 'css', 'json', 'xml', 'csv', 'py', 'java', 'sql', 'log', 'md', 'txt', 'pdf', 'docx'
-  ];
+  const supportedFileExtensions = [ '.html', '.js', '.css', '.json', '.xml', '.csv', '.py', '.java', '.sql', '.log', '.md', '.txt', '.pdf', '.docx' ];
 
   return message.attachments.some((attachment) => {
-    const contentType = attachment.contentType.toLowerCase();
-    const fileExtension = attachment.name.split('.').pop().toLowerCase();
-    return contentType.startsWith('image/') || contentType.startsWith('audio/') || contentType.startsWith('video/') || supportedFileExtensions.includes(fileExtension);
+    const contentType = (attachment.contentType || "").toLowerCase();
+    const fileExtension = path.extname(attachment.name) || '';
+    return (
+      (contentType.startsWith('image/') && contentType !== 'image/gif') ||
+      contentType.startsWith('audio/') ||
+      contentType.startsWith('video/') ||
+      supportedFileExtensions.includes(fileExtension)
+    );
   });
 }
 
@@ -718,7 +721,9 @@ async function processPromptAndMediaAttachments(prompt, message) {
     const validAttachments = attachments.filter(
       (attachment) => {
         const contentType = attachment.contentType.toLowerCase();
-        return contentType.startsWith('image/') || contentType.startsWith('audio/') || contentType.startsWith('video/');
+        return (contentType.startsWith('image/') && contentType !== 'image/gif') ||
+          contentType.startsWith('audio/') ||
+          contentType.startsWith('video/');
       }
     );
 
@@ -786,8 +791,8 @@ async function extractFileText(message, messageContent) {
   if (message.attachments.size > 0) {
     let attachments = Array.from(message.attachments.values());
     for (const attachment of attachments) {
-      const fileType = attachment.name.split('.').pop().toLowerCase();
-      const fileTypes = ['html', 'js', 'css', 'json', 'xml', 'csv', 'py', 'java', 'sql', 'log', 'md', 'txt', 'pdf', 'docx'];
+      const fileType = path.extname(attachment.name) || '';
+      const fileTypes = [ '.html', '.js', '.css', '.json', '.xml', '.csv', '.py', '.java', '.sql', '.log', '.md', '.txt', '.pdf', '.docx' ];
 
       if (fileTypes.includes(fileType)) {
         try {
@@ -2639,6 +2644,7 @@ async function handleModelResponse(initialBotMessage, chat, parts, originalMessa
       const newHistory = [];
       newHistory.push({ role: 'user', content: parts });
       async function getResponse(parts) {
+        let newResponse = '';
         const messageResult = await chat.sendMessageStream(parts);
         for await (const chunk of messageResult.stream) {
           if (stopGeneration) break;
@@ -2646,9 +2652,12 @@ async function handleModelResponse(initialBotMessage, chat, parts, originalMessa
           const chunkText = chunk.text();
           finalResponse += chunkText;
           tempResponse += chunkText;
+          newResponse += chunkText;
 
           const toolCalls = chunk.functionCalls();
           if (toolCalls) {
+            newHistory.push({ role: 'assistant', content: [{ text: newResponse }] });
+            newResponse = '';
             function convertArrayFormat(inputArray) {
               return inputArray.map(item => ({
                 functionCall: {
@@ -2683,6 +2692,7 @@ async function handleModelResponse(initialBotMessage, chat, parts, originalMessa
             updateTimeout = setTimeout(updateMessage, 500);
           }
         }
+        newHistory.push({ role: 'assistant', content: [{ text: newResponse }] });
       }
       await getResponse(parts);
 
@@ -2699,7 +2709,6 @@ async function handleModelResponse(initialBotMessage, chat, parts, originalMessa
           botMessage.edit({ components: [] });
         }
       }
-      newHistory.push({ role: 'assistant', content: [{ text: finalResponse }] });
       updateChatHistory(historyId, newHistory, botMessage.id);
       break;
     } catch (error) {
