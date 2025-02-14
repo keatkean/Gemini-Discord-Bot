@@ -1,13 +1,13 @@
 import dotenv from 'dotenv';
 dotenv.config();
 import fs from 'fs';
-import {
-  GoogleGenerativeAI
-} from '@google/generative-ai';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
 
 import { diffusionMaster } from '../text/diffusionMasterPrompt.js';
+
+const nsfwWordsArray = JSON.parse(fs.readFileSync('./text/nsfwWords.json', 'utf-8'));
 
 async function enhancePrompt1(prompt) {
   const retryLimit = 3;
@@ -45,7 +45,6 @@ async function enhancePrompt1(prompt) {
         if (process.env.OPENAI_API_KEY) {
           headers['Authorization'] = `Bearer ${process.env.OPENAI_API_KEY}`;
         }
-
 
         const baseURL = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
         axios.post(`${baseURL}/chat/completions`, payload, { headers: headers })
@@ -142,14 +141,16 @@ async function retryOperation(fn, maxRetries, delayMs = 1000) {
   throw new Error(`Operation failed after ${maxRetries} attempts: ${error.message}`);
 }
 
-const nsfwWordsArray = JSON.parse(fs.readFileSync('./text/nsfwWords.json', 'utf-8'));
-
-function filterPrompt(text) {
+function filterPrompt(prompt) {
   nsfwWordsArray.forEach(word => {
-    const regexPattern = new RegExp(word.split('').join('\\W*'), 'gi');
-    text = text.replace(regexPattern, '');
+    try {
+      const regex = new RegExp(`\\b${word}\\b`, "gi");
+      prompt = prompt.replace(regex, "[censored]");
+    } catch (error) {
+      console.error(`Error in regex for word: ${word}`, error);
+    }
   });
-  return text;
+  return prompt;
 }
 
 export {

@@ -2,10 +2,62 @@ import axios from 'axios';
 import EventSource from 'eventsource';
 import WebSocket from 'ws';
 import fs from 'fs';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+import dotenv from 'dotenv';
+
+dotenv.config();
+const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
 
 const config = JSON.parse(fs.readFileSync('config.json', 'utf-8'));
 const { bannerMusicGen, nevPrompt } = config;
 
+
+async function generatePoem(theme) {
+  try {
+    const model = await genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" });
+
+    let poemPrompt = `Write a short poem about: ${theme}`;
+
+    const requestBody = { contents: [{ parts: [{ text: poemPrompt }] }] };
+
+    const result = await model.generateContent(requestBody);
+
+    console.log("📌 Full AI response:", JSON.stringify(result, null, 2));
+
+    const poemText = result?.response?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+    if (!poemText) {
+      console.log("⚠️ Invalid AI response format:", result);
+      throw new Error("Invalid AI response format.");
+    }
+
+    return poemText;
+  } catch (error) {
+    console.error("❌ Error generating poem:", error);
+    return "Sorry, I couldn't generate a poem at the moment.";
+  }
+}
+
+async function generateStory(prompt, length) {
+  try {
+    const model = await genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" });
+    let storyPrompt = `Write a ${length ? length.toLowerCase() : "short"} story about: ${prompt}`;
+    
+    const result = await model.generateContent(storyPrompt);
+    console.log("📌 Full AI response:", result);
+
+    if (!result || !result.response || typeof result.response.text !== "function") {
+      console.log("⚠️ Invalid AI response format:", result);
+      throw new Error("Invalid AI response format.");
+    }
+
+    return await result.response.text();
+
+  } catch (error) {
+    console.error("❌ Error generating story:", error);
+    return "Sorry, I couldn't generate a story at the moment.";
+  }
+}
 
 function getEventId() {
   const bytes = new Uint8Array(16);
@@ -419,6 +471,8 @@ export {
   generateWithPlayground,
   generateImage,
   generateWithDalle3,
+  generatePoem,
+  generateStory,
   imgModels,
   imageModelFunctions
 };
