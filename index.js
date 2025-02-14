@@ -36,6 +36,8 @@ import osu from 'node-os-utils';
 const { mem } = osu;
 const { cpu } = osu;
 import axios from 'axios';
+import { generateStory } from './tools/generators.js';
+import { generatePoem } from './tools/generators.js';
 
 const config = JSON.parse(fs.readFileSync('config.json', 'utf-8'));
 
@@ -85,7 +87,8 @@ const FILE_PATHS = {
   userResponsePreference: path.join(CONFIG_DIR, 'user_response_preference.json'),
   alwaysRespondChannels: path.join(CONFIG_DIR, 'always_respond_channels.json'),
   channelWideChatHistory: path.join(CONFIG_DIR, 'channel_wide_chatistory.json'),
-  blacklistedUsers: path.join(CONFIG_DIR, 'blacklisted_users.json')
+  blacklistedUsers: path.join(CONFIG_DIR, 'blacklisted_users.json'),
+  notifications: path.join(CONFIG_DIR, 'notifications.json')
 };
 
 function saveStateToFile() {
@@ -107,6 +110,242 @@ function saveStateToFile() {
     }
   } catch (error) {
     console.error('Error saving state to files:', error);
+  }
+}
+
+let notifications = [];
+
+function saveNotifications() {
+  try {
+    fs.writeFileSync(FILE_PATHS.notifications, JSON.stringify(notifications, null, 2), 'utf-8');
+  } catch (error) {
+    console.error('Error saving notifications:', error);
+  }
+}
+
+function loadNotifications() {
+  try {
+    if (fs.existsSync(FILE_PATHS.notifications)) {
+      const data = fs.readFileSync(FILE_PATHS.notifications, 'utf-8');
+      notifications = JSON.parse(data);
+    }
+  } catch (error) {
+    console.error('Error loading notifications:', error);
+  }
+}
+
+loadNotifications();
+
+function addNotification({ userId, channelId, message, time }) {
+  notifications.push({ userId, channelId, message, time });
+  saveNotifications();
+}
+
+function removeNotification(index) {
+  notifications.splice(index, 1);
+  saveNotifications();
+}
+
+function listNotifications(userId) {
+  return notifications.filter(n => n.userId === userId);
+}
+
+async function checkNotifications() {
+
+  const now = Date.now();
+
+  for (let i = notifications.length - 1; i >= 0; i--) {
+      const notification = notifications[i];
+      const notificationTime = new Date(notification.time).getTime();
+
+      console.log('Processing notification:', notification);
+      console.log('Current time:', new Date().toISOString());
+      console.log('Notification time:', new Date(notification.time).toISOString());
+
+      if (notificationTime <= now) {
+          try {
+              const channel = await client.channels.fetch(notification.channelId);
+              if (channel && channel.isTextBased()) {
+                  console.log('Sending notification to channel:', notification.channelId);
+                  await channel.send(`<@${notification.userId}>: ${notification.message}`);
+              } else {
+                  console.error('Channel not found or is not text-based:', notification.channelId);
+              }
+
+              notifications.splice(i, 1);
+              console.log('Notification sent and removed:', notification);
+          } catch (error) {
+              console.error('Error sending notification:', error);
+          }
+      }
+  }
+}
+
+setInterval(checkNotifications, 1000); 
+
+import { SlashCommandBuilder } from '@discordjs/builders';
+
+const notificationCommand = new SlashCommandBuilder()
+  .setName('notify')
+  .setDescription('Schedule a notification')
+  .addStringOption(option => option.setName('message').setDescription('Notification message').setRequired(true))
+  .addStringOption(option => option.setName('time').setDescription('Time (HH:mm)').setRequired(true));
+
+const storyCommand = new SlashCommandBuilder()
+  .setName('write_story')
+  .setDescription('Generate a story based on a prompt')
+  .addStringOption(option => option.setName('prompt').setDescription('Describe your story').setRequired(true));
+
+const poemCommand = new SlashCommandBuilder()
+  .setName('write_poem')
+  .setDescription('Generate a poem based on a prompt')
+  .addStringOption(option => option.setName('prompt').setDescription('Describe your poem').setRequired(true));
+
+commands.push(notificationCommand);
+
+
+async function handleNotifyCommand(interaction) {
+  const message = interaction.options.getString('message');
+  const time = interaction.options.getString('time');
+  const channelId = interaction.channelId;
+
+  const now = new Date();
+  const [hour, minute] = time.split(':').map(Number);
+  const notificationTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, minute);
+
+  addNotification({ userId: interaction.user.id, channelId, message, time: notificationTime });
+  await interaction.reply({ content: `Notification scheduled for ${notificationTime.toLocaleTimeString()}.`, ephemeral: true });
+}
+async function handleWriteStoryCommand(interaction) {
+  try {
+    const prompt = interaction.options.getString('prompt');
+    const length = interaction.options.getString('length') || "Short";
+    console.log(`📌 Received prompt: ${prompt}`);
+
+    await interaction.deferReply();
+
+    const story = await generateStory(prompt, length);
+
+    if (!story || story.startsWith("Sorry")) {
+      console.log("⚠️ AI response was invalid.");
+      await interaction.editReply({ content: "⚠️ I couldn't generate a story. Please try again later." });
+      return;
+    }
+
+    console.log(`✅ Generated story successfully.`);
+
+    const storyEmbed = new EmbedBuilder()
+      .setColor(0x00FFFF)
+      .setTitle('📖 Your Generated Story')
+      .setDescription(`**Prompt:**\n\`\`\`${prompt}\`\`\`\n\n**Story:**\n${story.substring(0, 3900)}`);
+
+    await interaction.editReply({ embeds: [storyEmbed] });
+
+  } catch (error) {
+    console.error('❌ Error generating story:', error);
+
+    if (error.code === 10062) {
+      console.error("⚠️ Interaction expired before the bot could respond.");
+      return;
+    }
+
+    try {
+      await interaction.editReply({ content: "❌ An error occurred while generating your story. Please try again later." });
+    } catch (editError) {
+      console.error("⚠️ Could not edit reply, interaction may have expired:", editError);
+    }
+  }
+}
+
+async function handleWritePoemCommand(interaction) {
+  try {
+    await interaction.deferReply();
+
+    const theme = interaction.options.getString('theme');
+    console.log(`📌 Received theme: ${theme}`);
+
+    await interaction.editReply({ content: `📝 Generating a poem about **${theme}**...` });
+
+    const poem = await generatePoem(theme);
+    console.log(`✅ Generated poem: ${poem}`);
+
+    if (poem) {
+      const poemEmbed = new EmbedBuilder()
+        .setColor(0x00FFFF)
+        .setTitle('Your Generated Poem')
+        .setDescription(`**Theme:**\n\`\`\`${theme}\`\`\`\n\n**Poem:**\n${poem.substring(0, 3900)}`);
+
+      await interaction.editReply({ content: `${interaction.user}`, embeds: [poemEmbed] });
+    }
+  } catch (error) {
+    console.error('❌ Error generating poem:', error);
+
+    if (error.code === 10062) {
+      console.error("⚠️ Interaction expired before the bot could respond.");
+    }
+
+    try {
+      await interaction.editReply({ content: "An error occurred while generating your poem. Please try again later." });
+    } catch (followUpError) {
+      console.error("⚠️ Could not edit reply message:", followUpError);
+    }
+  }
+}
+
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isCommand()) return;
+
+  if (interaction.commandName === 'notify') {
+      const message = interaction.options.getString('message');
+      const time = interaction.options.getString('time');
+
+      const now = new Date();
+      const [hours, minutes] = time.split(':').map(Number);
+      const notificationTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hours, minutes);
+
+      notifications.push({
+          userId: interaction.user.id,
+          channelId: interaction.channelId,
+          message,
+          time: notificationTime.toISOString(),
+      });
+
+      await interaction.reply(`Notification scheduled for ${notificationTime.toLocaleTimeString()}.`);
+  }
+});
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isCommand()) return;
+
+  if (interaction.commandName === 'write_story') {
+    await handleWriteStoryCommand(interaction);
+  } else if (interaction.commandName === 'write_poem') {
+    await handleWritePoemCommand(interaction);
+  }
+});
+async function generateTextWithPrompt(prompt, type, userId) {
+  try {
+    const model = await genAI.getGenerativeModel({ model: "gemini-pro" });
+
+    const requestBody = {
+      contents: [
+        {
+          parts: [
+            { text: `Write a ${type} based on this prompt: ${prompt}` }
+          ]
+        }
+      ]
+    };
+
+    const response = await model.generateContent(requestBody);
+
+    if (response && response.candidates && response.candidates[0] && response.candidates[0].content) {
+      return response.candidates[0].content;
+    } else {
+      throw new Error("⚠️ Invalid AI response format.");
+    }
+  } catch (error) {
+    console.error(`❌ Error generating ${type}:`, error);
+    return "Sorry, I couldn't generate that at the moment.";
   }
 }
 
@@ -205,19 +444,19 @@ const MODEL = "gemini-1.5-flash-latest";
 const safetySettings = [
   {
     category: HarmCategory.HARM_CATEGORY_HARASSMENT,
-    threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+    threshold: HarmBlockThreshold.BLOCK_NONE,
   },
   {
     category: HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-    threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+    threshold: HarmBlockThreshold.BLOCK_NONE,
   },
   {
     category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-    threshold: HarmBlockThreshold.BLOCK_LOW_AND_ABOVE,
+    threshold: HarmBlockThreshold.BLOCK_NONE,
   },
   {
     category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-    threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+    threshold: HarmBlockThreshold.BLOCK_NONE,
   },
 ];
 
@@ -257,9 +496,6 @@ import {
   enhancePrompt
 } from './tools/others.js';
 
-// <==========>
-
-
 
 // <=====[Register Commands And Activities]=====>
 
@@ -295,9 +531,6 @@ client.once('ready', async () => {
     });
   }, 30000);
 });
-
-// <==========>
-
 
 
 // <=====[Messages And Interaction]=====>
@@ -370,6 +603,9 @@ client.on('interactionCreate', async (interaction) => {
     } else if (interaction.isStringSelectMenu()) {
       await handleSelectMenuInteraction(interaction);
     }
+    else if (interaction.commandName === 'notify') {
+      await handleNotifyCommand(interaction);
+    }
   } catch (error) {
     console.error('Error handling interaction:', error.message);
   }
@@ -389,7 +625,15 @@ async function handleCommandInteraction(interaction) {
     settings: showSettings,
     server_settings: showDashboard,
     music: handleMusicCommand,
-    status: handleStatusCommand
+    status: handleStatusCommand,
+    notify: handleNotifyCommand,
+    write_story: handleWriteStoryCommand,
+    write_poem: handleWritePoemCommand,
+    questions: handleQuestionsCommand,
+    help: handleManualCommand,
+    alarm: handleAlarmCommand,
+    view_alarms: handleViewAlarmsCommand,
+    delete_alarm: handleDeleteAlarmCommand
   };
 
   const handler = commandHandlers[interaction.commandName];
@@ -398,6 +642,236 @@ async function handleCommandInteraction(interaction) {
   } else {
     console.log(`Unknown command: ${interaction.commandName}`);
   }
+}
+
+const alarms = {};
+const alarmTimeouts = {}; 
+
+async function handleAlarmCommand(interaction) {
+  const userId = interaction.user.id;
+  const args = interaction.options.getString("details").split(" ");
+
+  if (args.length < 3) {
+    return interaction.reply({
+      content: "Invalid format! Use `/alarm YYYY-MM-DD HH:MM Your message`.",
+      ephemeral: true,
+    });
+  }
+
+  const datePart = args[0];
+  const timePart = args[1];
+  const message = args.slice(2).join(" ");
+
+  const alarmDate = new Date(`${datePart}T${timePart}:00+08:00`); 
+
+  if (isNaN(alarmDate.getTime())) {
+    return interaction.reply({
+      content: "Invalid date or time format! Use `/alarm YYYY-MM-DD HH:MM Your message`.",
+      ephemeral: true,
+    });
+  }
+
+  if (!alarms[userId]) {
+    alarms[userId] = [];
+    alarmTimeouts[userId] = [];
+  }
+
+  const alarmIndex = alarms[userId].length;
+  alarms[userId].push({ date: alarmDate, message, channelId: interaction.channelId, guildId: interaction.guildId });
+
+  const now = new Date();
+  const delay = alarmDate - now;
+
+  if (delay > 0) {
+    const timeoutId = setTimeout(() => triggerAlarm(userId, alarmIndex), delay);
+    alarmTimeouts[userId].push(timeoutId);
+  }
+
+  interaction.reply({
+    content: `✅ Alarm set for **${alarmDate.toLocaleString("en-SG", { timeZone: "Asia/Singapore" })}** (Singapore Time) with message: "${message}".`,
+    ephemeral: true,
+  });
+}
+
+async function handleViewAlarmsCommand(interaction) {
+  const userId = interaction.user.id;
+
+  if (!alarms[userId] || alarms[userId].length === 0) {
+    return interaction.reply({
+      content: "You have no active alarms.",
+      ephemeral: true,
+    });
+  }
+
+  const alarmList = alarms[userId]
+    .map(
+      (alarm, index) =>
+        `${index + 1}. **${alarm.date.toLocaleString("en-SG", { timeZone: "Asia/Singapore" })}** - ${alarm.message}`
+    )
+    .join("\n");
+
+  interaction.reply({
+    content: `⏰ **Your Active Alarms:**\n${alarmList}`,
+    ephemeral: true,
+  });
+}
+
+async function handleDeleteAlarmCommand(interaction) {
+  const userId = interaction.user.id;
+  const alarmNumber = parseInt(interaction.options.getInteger("number"), 10) - 1;
+
+  if (!alarms[userId] || alarms[userId].length === 0) {
+    return interaction.reply({
+      content: "You have no alarms to delete.",
+      ephemeral: true,
+    });
+  }
+
+  if (isNaN(alarmNumber) || alarmNumber < 0 || alarmNumber >= alarms[userId].length) {
+    return interaction.reply({
+      content: "Invalid alarm number! Use `/delete-alarm [number]`.",
+      ephemeral: true,
+    });
+  }
+
+  clearTimeout(alarmTimeouts[userId][alarmNumber]);
+  alarmTimeouts[userId].splice(alarmNumber, 1);
+
+  const removedAlarm = alarms[userId].splice(alarmNumber, 1);
+
+  interaction.reply({
+    content: `✅ Deleted alarm: **${removedAlarm[0].date.toLocaleString("en-SG", { timeZone: "Asia/Singapore" })}** - ${removedAlarm[0].message}`,
+    ephemeral: true,
+  });
+}
+
+async function triggerAlarm(userId, alarmIndex) {
+  if (!alarms[userId] || !alarms[userId][alarmIndex]) return; 
+
+  try {
+    const { message, channelId, guildId } = alarms[userId][alarmIndex];
+    const guild = await client.guilds.fetch(guildId);
+    const channel = guild.channels.cache.get(channelId);
+
+    if (channel) {
+      channel.send(`🔔 <@${userId}> **Alarm Reminder** 🔔\n${message}`);
+    } else {
+      console.error(`❌ Could not fetch channel for guild ID ${guildId}.`);
+    }
+
+    alarms[userId].splice(alarmIndex, 1);
+    alarmTimeouts[userId].splice(alarmIndex, 1);
+  } catch (error) {
+    console.error(`❌ Error triggering alarm for user ${userId}:`, error);
+  }
+}
+
+async function handleQuestionsCommand(interaction) {
+  const originalUserId = interaction.user.id; 
+
+  async function sendCategorySelection(interaction, isUpdate = false) {
+    const buttons = Object.keys(categories).map((category) =>
+      new ButtonBuilder()
+        .setCustomId(`category_${category}`)
+        .setLabel(category)
+        .setStyle(ButtonStyle.Primary)
+    );
+
+    const row = new ActionRowBuilder().addComponents(buttons);
+
+    const responsePayload = {
+      content: "Please select a category:",
+      components: [row],
+      ephemeral: true,
+    };
+
+    if (isUpdate) {
+      await interaction.editReply(responsePayload); 
+    } else {
+      await interaction.reply(responsePayload);
+    }
+  }
+
+  await sendCategorySelection(interaction);
+
+  const filter = (i) => i.user.id === originalUserId;
+  const collector = interaction.channel.createMessageComponentCollector({ filter, time: 30000 });
+
+  collector.on("collect", async (buttonInteraction) => {
+    const selectedCategory = buttonInteraction.customId.replace("category_", "");
+
+    if (!categories[selectedCategory]) {
+      return buttonInteraction.reply({ content: "Invalid category selected.", ephemeral: true });
+    }
+
+    const questions = categories[selectedCategory];
+    const embed = new EmbedBuilder()
+    .setColor(0x00FFFF)
+    .setTitle(`Questions - ${selectedCategory}`)
+    .setDescription(
+      questions.map((q, i) => `${i + 1}. ${q.question}`).join("\n") +
+      "\n\nReply with the **number** of the question you want the answer to!"
+    )
+    .setFooter({ text: "You have **30 seconds** to reply or the session will expire!\nType `0` to go back to categories." });  
+
+    await buttonInteraction.update({ embeds: [embed], components: [], ephemeral: true });
+
+    const messageFilter = (message) =>
+      message.author.id === originalUserId && /^[0-9]+$/.test(message.content);
+
+    const messageCollector = interaction.channel.createMessageCollector({
+      filter: messageFilter,
+      time: 30000,
+    });
+
+    messageCollector.on("collect", async (message) => {
+      const selectedIndex = parseInt(message.content, 10);
+
+      if (selectedIndex === 0) {
+        await sendCategorySelection(interaction, true); 
+        messageCollector.stop(); 
+        return;
+      }
+
+      if (selectedIndex > 0 && selectedIndex <= questions.length) {
+        const answerEmbed = new EmbedBuilder()
+          .setColor(0x00FFFF)
+          .setTitle(`Answer to Question ${selectedIndex}`)
+          .setDescription(questions[selectedIndex - 1].answer);
+
+        await message.reply({ embeds: [answerEmbed], ephemeral: true });
+      } else {
+        await message.reply({ content: "Invalid number! Please enter a valid question number.", ephemeral: true });
+      }
+    });
+
+    messageCollector.on("end", (collected) => {
+      if (collected.size === 0) {
+        buttonInteraction.followUp({
+          content: "Time's up! Please use `/questions` again to try.",
+          ephemeral: true,
+        });
+      }
+    });
+  });
+
+  collector.on("end", (collected) => {
+    if (collected.size === 0) {
+      interaction.followUp({
+        content: "You did not select a category in time. Please use `/questions` again to try.",
+        ephemeral: true,
+      });
+    }
+  });
+}
+
+async function handleManualCommand(interaction) {
+  const embed = new EmbedBuilder()
+    .setColor(0x00FFFF)
+    .setTitle('Bot Manual')
+    .setDescription(manual);
+
+  await interaction.reply({ embeds: [embed], ephemeral: true }); 
 }
 
 async function handleButtonInteraction(interaction) {
@@ -659,12 +1133,10 @@ async function handleTextMessage(message) {
   const isChannelChatHistoryEnabled = guildId ? channelWideChatHistory[channelId] : false;
   const finalInstructions = isServerChatHistoryEnabled ? instructions + infoStr : instructions;
   const historyId = isChannelChatHistoryEnabled ? (isServerChatHistoryEnabled ? guildId : channelId) : userId;
-  console.log('Final Instructions:', defaultPersonality+instructions+infoStr);
+
   const model = await genAI.getGenerativeModel({
     model: MODEL,
-    //systemInstruction: { role: "system", parts: [{ text: finalInstructions || defaultPersonality }] },
-    systemInstruction: { role: "system", parts: [{ text: defaultPersonality+instructions+infoStr }] },
-    contents: parts,
+    systemInstruction: { role: "system", parts: [{ text: finalInstructions || defaultPersonality }] },
     generationConfig,
     tools: { functionDeclarations: function_declarations }
   });
@@ -2828,6 +3300,61 @@ function updateChatHistory(id, newHistory, messagesId) {
   chatHistories[id][messagesId] = [...chatHistories[id][messagesId], ...newHistory];
 }
 
-// <==========>
+const categories = {
+  "Assignments and Deadlines": [
+    { question: "What upcoming assignments are there", answer: "Please check the module plan on brightspace." },
+    { question: "What upcoming deadlines are there", answer: "Please check the notifications!" },
+    { question: "Can my deadline be extended?", answer: "Please contact your lecturer regarding deadline extensions." },
+  ],
+  "Attendance and Absence": [
+    { question: "What should I do when absent?", answer: "Submit your SOA via the NYP Portal." },
+    { question: "What is my current attendance rate?", answer: "Please check your NYP Portal regarding your attendance." },
+  ],
+  "Grades": [
+    { question: "Why am I grade cap?", answer: "Your attendance rate is below 75%." },
+    { question: "When is my interim grades releasing?", answer: "Please check with your PEM!" },
+  ],
+  "School Websites/Social Media": [
+    { question: "NYP Website", answer: "[Visit NYP Website](https://www.nyp.edu.sg/student)" },
+    { question: "Brightspace", answer: "[Access Brightspace](https://politemall.polite.edu.sg/)" },
+    { question: "NYP Portal", answer: "[Go to NYP Portal](https://mynypportal.nyp.edu.sg/)" },
+    { question: "NYP Instagram", answer: "[Follow on Instagram](https://www.instagram.com/nanyangpoly/)" },
+  ],
+  "PEM Details": [
+    { question: "PEM Contact Number", answer: "+65 1234 5678" },
+    { question: "PEM Email", answer: "____@mymail.nyp.edu.sg" },
+  ],
+};
+
+const manual = `
+**Lists of Functions and Commands**
+1. AI Generation
+/imagine [prompt] [model] [resolution]: Generate an image using a selected model and resolution.
+/speech [language] [prompt]: Generate speech from text in the specified language.
+/music [prompt]: Generate music based on a prompt.
+/write_story [prompt] [length]: Generate a story based on the prompt with a choice of length
+/write_poem [theme]: Generates a poem based on the theme given
+
+2. Chat Management
+/respond_to_all: Enable the bot to respond to all messages in the channel.
+/clear_memory: Clear the conversation history.
+/settings: Open user settings.
+/server_settings: Open server settings.
+
+3. Admin Commands
+/blacklist [user]: Blacklist a user from using certain interactions.
+/whitelist [user]: Remove a user from the blacklist.
+/status: Display bot's CPU and RAM usage in detail.
+
+4. Assistance Commands
+/questions: Generates a list of frequently asked questions.
+/help: Generates the manual for PEM PAL.
+
+5.Functions Commands
+/alarm [date time message]: Generates an alarm for the user.
+/view_alarms: Allow users to view their alarms.
+/delete_alarm [number]: Allow users to delete their alarms.
+/notify [message] [time]: bot sets a notification for an event
+`;
 
 client.login(token);

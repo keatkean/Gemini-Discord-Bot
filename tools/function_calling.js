@@ -1,7 +1,65 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { YoutubeTranscript } from 'youtube-transcript';
-import { evaluate } from 'mathjs'
+import { evaluate } from 'mathjs';
+import { generatePoem, generateStory } from "./generators.js";
+
+async function writePoem(args, name) {
+  const { theme } = args;
+  try {
+    const poem = await generatePoem(theme);
+    return [
+      {
+        functionResponse: {
+          name: name,
+          response: {
+            theme: theme,
+            content: poem
+          }
+        }
+      }
+    ];
+  } catch (error) {
+    console.error("Error generating poem:", error);
+    return [
+      {
+        functionResponse: {
+          name: name,
+          response: { error: "Failed to generate poem." }
+        }
+      }
+    ];
+  }
+}
+
+async function writeStory(args, name) {
+  const { prompt, length } = args;
+  try {
+    const story = await generateStory(prompt, length);
+    return [
+      {
+        functionResponse: {
+          name: name,
+          response: {
+            prompt: prompt,
+            length: length,
+            content: story
+          }
+        }
+      }
+    ];
+  } catch (error) {
+    console.error("Error generating story:", error);
+    return [
+      {
+        functionResponse: {
+          name: name,
+          response: { error: "Failed to generate story." }
+        }
+      }
+    ];
+  }
+}
 
 const function_declarations = [
   {
@@ -266,7 +324,9 @@ async function manageToolCall(toolCall) {
     "web_search": webSearch,
     "search_webpage": searchWebpage,
     "get_youtube_transcript": getYoutubeTranscript,
-    "calculate": calculate
+    "calculate": calculate,
+    "write_poem": writePoem,
+    "write_story": writeStory
   }
   const functionName = toolCall.name;
   const func = tool_calls_to_function[functionName];

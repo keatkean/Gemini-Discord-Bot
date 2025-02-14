@@ -135,6 +135,76 @@ const commands = [
         "required": false
       }
     ]
+  },
+  {
+    "name": "questions",
+    "description": "Frequently asked questions."
+  },
+  {
+    "name": "help",
+    "description": "PEM PAL Manual"
+  },
+  {
+    "name": "alarm",
+    "description": "Set an alarm for a specific time and date.",
+    "options": [
+      {
+        "name": "details",
+        "description": "Specify YYYY-MM-DD HH:MM and your message.",
+        "type": 3,
+        "required": true,
+      },
+    ],
+  },
+  {
+    "name": "view_alarms",
+    "description": "View all your active alarms.",
+  },
+  {
+    "name": "delete_alarm",
+    "description": "Delete a specific alarm by number.",
+    "options": [
+      {
+        "name": "number",
+        "description": "The number of the alarm to delete (as listed in /view-alarms).",
+        "type": 4,
+        "required": true,
+      },
+    ],
+  }, 
+  {
+    "name": "write_poem",
+    "description": "Generate a poem based on user input.",
+    "options": [
+      {
+        "type": 3,
+        "name": "theme",
+        "description": "Theme or topic for the poem.",
+        "required": true
+      }
+    ]
+  },
+  {
+    "name": "write_story",
+    "description": "Generate a short story based on a prompt.",
+    "options": [
+      {
+        "type": 3,
+        "name": "prompt",
+        "description": "Story idea or prompt.",
+        "required": true
+      },
+      {
+        "type": 3,
+        "name": "length",
+        "description": "Short or long story?",
+        "required": false,
+        "choices": [
+          { "name": "Short", "value": "Short" },
+          { "name": "Long", "value": "Long" }
+        ]
+      }
+    ]
   }
 ];
 
