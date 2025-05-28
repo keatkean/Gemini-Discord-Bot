@@ -1,7 +1,13 @@
 import dotenv from 'dotenv';
-dotenv.config();
 import fs from 'fs';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+
+const result = dotenv.config({ path: './example.env' });  // Specify the correct path to the file
+if (result.error) {
+  console.error("Error loading .env file:", result.error);
+} else {
+  console.log("Successfully loaded .env file");
+}
 
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
 

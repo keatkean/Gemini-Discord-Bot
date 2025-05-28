@@ -5,8 +5,14 @@ import fs from 'fs';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import dotenv from 'dotenv';
 
-dotenv.config();
+const result = dotenv.config({ path: './example.env' });  // Specify the correct path to the file
+if (result.error) {
+  console.error("Error loading .env file:", result.error);
+} else {
+  console.log("Successfully loaded .env file");
+}
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
+//console.log("Google API Key Loaded:", process.env.GOOGLE_API_KEY); // Debugging
 
 const config = JSON.parse(fs.readFileSync('config.json', 'utf-8'));
 const { bannerMusicGen, nevPrompt } = config;

@@ -1,5 +1,10 @@
 import dotenv from 'dotenv';
-dotenv.config();
+const result = dotenv.config({ path: './example.env' });  // Specify the correct path to the file
+if (result.error) {
+  console.error("Error loading .env file:", result.error);
+} else {
+  console.log("Successfully loaded .env file");
+}
 import {
   Client,
   GatewayIntentBits,
@@ -38,8 +43,19 @@ const { cpu } = osu;
 import axios from 'axios';
 import { generateStory } from './tools/generators.js';
 import { generatePoem } from './tools/generators.js';
+import { SlashCommandBuilder } from '@discordjs/builders';
+import { execSync } from 'child_process';
+
+// Kill any old Node.js processes running the 
+//try {
+    //console.log("🛑 Stopping any existing bot instances...");
+    //execSync("pkill -f 'node index.js' || echo 'No previous bot found'", { stdio: 'inherit' });
+//} catch (error) {
+    //console.error("⚠️ Error clearing old bot instances:", error.message);
+//}
 
 const config = JSON.parse(fs.readFileSync('config.json', 'utf-8'));
+const nsfwWords = JSON.parse(fs.readFileSync('./text/nsfwWords.json', 'utf-8'));
 
 const client = new Client({
   intents: [
@@ -56,6 +72,10 @@ const fileManager = new GoogleAIFileManager(process.env.GOOGLE_API_KEY);
 const token = process.env.DISCORD_BOT_TOKEN;
 const activeRequests = new Set();
 
+
+//console.log("Token Loaded:", token); // Debugging
+//console.log("Google API Key Loaded:", process.env.GOOGLE_API_KEY); // Debugging
+
 // Define your objects
 let chatHistories = {};
 let activeUsersInChannels = {};
@@ -69,6 +89,18 @@ let userResponsePreference = {};
 let alwaysRespondChannels = {};
 let channelWideChatHistory = {};
 let blacklistedUsers = {};
+
+const nsfwLogsFile = './config/nsfwLogs.json';
+let nsfwLogs = [];
+
+if (fs.existsSync(nsfwLogsFile)) {
+  try {
+    nsfwLogs = JSON.parse(fs.readFileSync(nsfwLogsFile, 'utf-8'));
+  } catch (error) {
+    console.error('⚠️ Failed to load NSFW logs:', error);
+  }
+}
+
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -88,7 +120,8 @@ const FILE_PATHS = {
   alwaysRespondChannels: path.join(CONFIG_DIR, 'always_respond_channels.json'),
   channelWideChatHistory: path.join(CONFIG_DIR, 'channel_wide_chatistory.json'),
   blacklistedUsers: path.join(CONFIG_DIR, 'blacklisted_users.json'),
-  notifications: path.join(CONFIG_DIR, 'notifications.json')
+  notifications: path.join(CONFIG_DIR, 'notifications.json'),
+  announcements: path.join(CONFIG_DIR, 'announcements.json'), // Integrated announcements file
 };
 
 function saveStateToFile() {
@@ -112,6 +145,238 @@ function saveStateToFile() {
     console.error('Error saving state to files:', error);
   }
 }
+
+//announce command
+let announcements = [];
+const ANNOUNCEMENTS_FILE = FILE_PATHS.announcements;
+
+function saveAnnouncements() {
+  try {
+    fs.writeFileSync(ANNOUNCEMENTS_FILE, JSON.stringify(announcements, null, 2), 'utf-8');
+  } catch (error) {
+    console.error('Error saving announcements:', error);
+  }
+}
+
+function loadAnnouncements() {
+  try {
+    if (fs.existsSync(ANNOUNCEMENTS_FILE)) {
+      const data = fs.readFileSync(ANNOUNCEMENTS_FILE, 'utf-8');
+      announcements = JSON.parse(data);
+    }
+  } catch (error) {
+    console.error('Error loading announcements:', error);
+  }
+}
+
+loadAnnouncements();
+
+function isValidURL(string) {
+  try {
+    new URL(string);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function addAnnouncement({ guild, commandChannel, date, time, title, message, links, pingRole, }) {
+  // If date is not provided, use today's date
+  if (!date) {
+    const today = new Date();
+    date = today.toISOString().split('T')[0]; // Format as YYYY-MM-DD
+  }
+
+  const announcementTime = new Date(`${date}T${time}:00+08:00`);
+  if (isNaN(announcementTime.getTime())) {
+    throw new Error('Invalid date or time format! Use YYYY-MM-DD HH:MM.');
+  }
+
+  if (announcementTime <= new Date()) {
+    throw new Error('The announcement time must be in the future.');
+  }
+
+  // Validate links
+  if (links && !isValidURL(links)) {
+    console.warn('Invalid link detected, setting links to empty.');
+    links = '';
+  }
+
+  // Try to find the "announcement" channel, fallback to command channel if not found
+  let targetChannel = guild.channels.cache.find(channel => channel.name === 'announcement' && channel.isTextBased());
+
+  if (!targetChannel) {
+    targetChannel = commandChannel; // Fallback to the channel where the command was used
+  }
+
+  announcements.push({ guildId: guild.id, channelId: targetChannel.id, date: announcementTime, title, message, links, pingRole, });
+  saveAnnouncements();
+}
+
+function removeAnnouncement(index) {
+  announcements.splice(index, 1);
+  saveAnnouncements();
+}
+
+function listAnnouncements(guildId) {
+  return announcements.filter(a => a.guildId === guildId);
+}
+
+async function checkAnnouncements() {
+  const now = new Date();
+
+  for (let i = announcements.length - 1; i >= 0; i--) {
+    const announcement = announcements[i];
+    const announcementTime = new Date(announcement.date);
+
+    if (announcementTime <= now) {
+      try {
+        const guild = await client.guilds.fetch(announcement.guildId);
+        const channel = guild.channels.cache.get(announcement.channelId);
+
+        if (channel && channel.isTextBased()) {
+
+          let ping = '@everyone'
+
+          if (announcement.pingRole) {
+            if (announcement.pingRole === '@everyone' || announcement.pingRole === '@here') {
+              ping = announcement.pingRole; // Ensure correct mention format
+            } else {
+              let roleId = announcement.pingRole.replace(/<@&|>/g, ''); // Remove mention format if present
+              let role = guild.roles.cache.get(roleId) || guild.roles.cache.find(r => r.name === announcement.pingRole);
+          
+              if (role) {
+                ping = `<@&${role.id}>`;
+              } else {
+                console.warn(`Role "${announcement.pingRole}" not found in guild.`);
+              }
+            }
+          }
+          //pings the specific role if it exists
+          //const ping = announcement.pingRole ? `@${announcement.pingRole}` : '@everyone';
+
+          await channel.send(`${ping} 📢 **${announcement.title}** 📢\n${announcement.message}${announcement.links ? `\n🔗 **Links:** ${announcement.links}` : ''}`);
+        } else {
+          console.error('Channel not found or is not text-based:', announcement.channelId);
+        }
+
+        announcements.splice(i, 1);
+        saveAnnouncements();
+      } catch (error) {
+        console.error('Error sending announcement:', error);
+      }
+    }
+  }
+}
+
+setInterval(checkAnnouncements, 1000);
+
+const announceCommand = new SlashCommandBuilder()
+  .setName('announce')
+  .setDescription('Schedule an announcement')
+  .addStringOption(option => option.setName('time').setDescription('Time (HH:MM, 24hr)').setRequired(true))
+  .addStringOption(option => option.setName('title').setDescription('Title of the announcement').setRequired(true))
+  .addStringOption(option => option.setName('message').setDescription('Announcement message').setRequired(true))
+  .addStringOption(option => option.setName('date').setDescription('Date (YYYY-MM-DD)').setRequired(false))
+  .addStringOption(option => option.setName('links').setDescription('Optional links').setRequired(false))
+  .addRoleOption(option => option.setName('ping_role').setDescription('Role to ping (default: @everyone)').setRequired(false));
+
+commands.push(announceCommand);
+
+const removeAnnouncementCommand = new SlashCommandBuilder()
+  .setName('removeannouncement')
+  .setDescription('Removes a scheduled announcement by index')
+  .addIntegerOption(option => 
+    option.setName('index')
+    .setDescription('Index of the announcement to remove (check listannouncements)')
+    .setRequired(true)
+  );
+
+const listAnnouncementsCommand = new SlashCommandBuilder()
+  .setName('listannouncements')
+  .setDescription('Lists all scheduled announcements');
+
+commands.push(removeAnnouncementCommand, listAnnouncementsCommand,); 
+
+
+//poll related commands
+const pollsFile = path.join(__dirname, 'polls.json');
+const activePolls = new Map();
+
+// 🔄 Load polls from file on bot startup
+if (fs.existsSync(pollsFile)) {
+  const savedPolls = JSON.parse(fs.readFileSync(pollsFile, 'utf8'));
+  for (const [pollId, pollData] of Object.entries(savedPolls)) {
+    pollData.voters = new Set(pollData.voters);
+    activePolls.set(pollId, pollData);
+  }
+}
+
+// 💾 Function to save polls to a file
+function savePollsToFile() {
+  const dataToSave = Object.fromEntries([...activePolls].map(([pollId, pollData]) => [
+    pollId,
+    { ...pollData, voters: [...pollData.voters] }
+  ]));
+  fs.writeFileSync(pollsFile, JSON.stringify(dataToSave, null, 2));
+}
+
+// 📌 Poll command with anonymous option
+const pollCommand = new SlashCommandBuilder()
+  .setName('poll')
+  .setDescription('Create a poll with multiple options')
+  .addStringOption(option =>
+    option.setName('question')
+      .setDescription('The poll question')
+      .setRequired(true))
+  .addStringOption(option =>
+    option.setName('options')
+      .setDescription('Comma-separated options (max 10)')
+      .setRequired(true))
+  .addBooleanOption(option =>
+    option.setName('anonymous')
+      .setDescription('Should votes be anonymous? (true/false)')
+      .setRequired(true));
+
+commands.push(pollCommand);
+
+// 📌 View Polls Command
+const viewPollsCommand = new SlashCommandBuilder()
+  .setName('viewpolls')
+  .setDescription('View active polls and votes');
+
+commands.push(viewPollsCommand);
+
+const clearPollsCommand = new SlashCommandBuilder()
+  .setName('clearpolls')
+  .setDescription('Clears all active polls from memory and storage');
+
+commands.push(clearPollsCommand);
+
+// 📌 Command to end the poll
+const endPollCommand = new SlashCommandBuilder()
+  .setName('endpoll')
+  .setDescription('End an active poll')
+  .addStringOption(option =>
+    option.setName('poll_id')
+      .setDescription('Message ID of the poll')
+      .setRequired(true));
+
+commands.push(endPollCommand);
+
+// 📌 View NSFW Word Logs Command
+const viewNSFWLogsCommand = new SlashCommandBuilder()
+  .setName('viewnsfwlogs')
+  .setDescription('View logged NSFW word violations');
+
+commands.push(viewNSFWLogsCommand);
+
+const clearNSFWLogsCommand = new SlashCommandBuilder()
+  .setName('clearnsfwlogs')
+  .setDescription('Clear all logged NSFW word violations (Admin only)');
+
+commands.push(clearNSFWLogsCommand);
+
 
 let notifications = [];
 
@@ -183,8 +448,6 @@ async function checkNotifications() {
 
 setInterval(checkNotifications, 1000); 
 
-import { SlashCommandBuilder } from '@discordjs/builders';
-
 const notificationCommand = new SlashCommandBuilder()
   .setName('notify')
   .setDescription('Schedule a notification')
@@ -202,6 +465,9 @@ const poemCommand = new SlashCommandBuilder()
   .addStringOption(option => option.setName('prompt').setDescription('Describe your poem').setRequired(true));
 
 commands.push(notificationCommand);
+//commands.push(storyCommand);
+//commands.push(poemCommand);
+
 
 
 async function handleNotifyCommand(interaction) {
@@ -218,11 +484,14 @@ async function handleNotifyCommand(interaction) {
 }
 async function handleWriteStoryCommand(interaction) {
   try {
+
+    await interaction.deferReply();
+
     const prompt = interaction.options.getString('prompt');
     const length = interaction.options.getString('length') || "Short";
     console.log(`📌 Received prompt: ${prompt}`);
 
-    await interaction.deferReply();
+    //await interaction.deferReply();
 
     const story = await generateStory(prompt, length);
 
@@ -267,6 +536,13 @@ async function handleWritePoemCommand(interaction) {
     await interaction.editReply({ content: `📝 Generating a poem about **${theme}**...` });
 
     const poem = await generatePoem(theme);
+
+    if (!poem || poem.startsWith("Sorry")) {
+      console.log("⚠️ AI response was invalid.");
+      await interaction.editReply({ content: "⚠️ I couldn't generate a poem. Please try again later." });
+      return;
+    }
+
     console.log(`✅ Generated poem: ${poem}`);
 
     if (poem) {
@@ -434,6 +710,9 @@ loadStateFromFile();
 
 const MODEL = "gemini-1.5-flash-latest";
 
+//test const for model (doesnt work)
+// const MODEL = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" });
+
 /*
 `BLOCK_NONE`  -  Always show regardless of probability of unsafe content
 `BLOCK_ONLY_HIGH`  -  Block when high probability of unsafe content
@@ -499,24 +778,66 @@ import {
 
 // <=====[Register Commands And Activities]=====>
 
-import { commands } from './commands.js';
+import { commands } from './commands.js'; 
 
 let activityIndex = 0;
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}!`);
+  if (!client.user.id) {
+    console.error('❌ Bot ID is null. Waiting for it to be available...');
+    return;
+  }
+  //console.log(` ${client.user.tag}'s ID is ${client.user.id}!`); //To test if the client.user.id is correct
 
   const rest = new REST({ version: '10' }).setToken(token);
-  try {
-    console.log('Started refreshing application (/) commands.');
 
-    await rest.put(
-      Routes.applicationCommands(client.user.id), { body: commands },
-    );
+(async () => {
+    try {
+        console.log('🔍 Testing Discord API connectivity...');
+        const data = await rest.get(Routes.applicationCommands(client.user.id)); 
+        console.log('✅ API responded successfully!');
+    } catch (error) {
+        console.error('❌ Rate limit issue:', error);
+    }
+})();
 
-    console.log('Successfully reloaded application (/) commands.');
-  } catch (error) {
+try {
+    console.log('🚨 Checking existing commands...');
+    const existingCommands = await rest.get(Routes.applicationCommands(client.user.id));
+
+    // Convert both lists to a stringified JSON format for deep comparison
+    const existingCommandsJSON = JSON.stringify(existingCommands, null, 2);
+    const newCommandsJSON = JSON.stringify(commands, null, 2);
+
+    if (existingCommandsJSON === newCommandsJSON) {
+        console.log('✅ Commands are up-to-date, skipping re-registration.');
+        console.log('Registered Commands:', commands.map(cmd => cmd.name));
+        return;
+    }
+
+    //await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
+    //console.log('✅ Successfully updated application (/) commands.');
+
+    //To force delete all commands
+    //console.log('🚨 Clearing all old commands...');
+    //await rest.put(Routes.applicationCommands(client.user.id), { body: [] }); // Deletes all old commands
+    //if (!commands || commands.length === 0) {
+        //console.error('❌ No commands found. Check your command loading logic.');
+        //process.exit(1);
+    //}
+
+    try {
+        console.log('🔄 Updating and refreshing commands...');
+        await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
+        console.log('✅ Successfully reloaded application (/) commands.');
+        console.log('Registered Commands:', commands.map(cmd => cmd.name));
+    } catch (error) {
+        console.error('❌ Error while registering commands:', error);
+    }
+
+} catch (error) {
     console.error(error);
-  }
+}
 
   client.user.setPresence({
     activities: [activities[activityIndex]],
@@ -535,62 +856,108 @@ client.once('ready', async () => {
 
 // <=====[Messages And Interaction]=====>
 
-client.on('messageCreate', async (message) => {
-  try {
-    if (message.author.bot) return;
-    if (message.content.startsWith('!')) return;
-
-    const isDM = message.channel.type === ChannelType.DM;
-    const mentionPattern = new RegExp(`^<@!?${client.user.id}>(?:\\s+)?(generate|imagine)`, 'i');
-    const startsWithPattern = /^generate|^imagine/i;
-    const command = message.content.match(mentionPattern) || message.content.match(startsWithPattern);
-
-    const shouldRespond = (
-      workInDMs && isDM ||
-      alwaysRespondChannels[message.channelId] ||
-      (message.mentions.users.has(client.user.id) && !isDM) ||
-      activeUsersInChannels[message.channelId]?.[message.author.id]
-    );
-
-    if (shouldRespond) {
-      if (message.guild) {
-        initializeBlacklistForGuild(message.guild.id);
-        if (blacklistedUsers[message.guild.id].includes(message.author.id)) {
-          const embed = new EmbedBuilder()
-            .setColor(0xFF0000)
-            .setTitle('Blacklisted')
-            .setDescription('You are blacklisted and cannot use this bot.');
-          return message.reply({ embeds: [embed] });
-        }
+  client.on('messageCreate', async (message) => {
+    try {
+      // 🛑 Ignore bot messages and messages outside of servers
+      if (message.author.bot || !message.guild) return;
+  
+      // 🚫 NSFW Word Filtering + Logging (Exact match, case-sensitive)
+      const content = message.content; // keep original casing
+      const matchedWord = nsfwWords.find(word => {
+        const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const pattern = new RegExp(`\\b${escaped}\\b`); // Remove the 'i' flag for case-sensitive match
+        return pattern.test(message.content);
+      });
+      
+      if (matchedWord) {
+        console.log("Found offensive content:", matchedWord);
       }
-      if (command) {
-        const prompt = message.content.slice(command.index + command[0].length).trim();
-        if (prompt) {
-          await genimg(prompt, message);
+
+      if (matchedWord) {
+        try {
+          await message.delete();
+          await message.channel.send({
+            content: `🚫 Your message was removed for containing inappropriate content, <@${message.author.id}>.`,
+          });
+
+          // Log the violation
+          nsfwLogs.push({
+            username: message.author.tag,
+            word: matchedWord,
+            timestamp: new Date().toLocaleString('en-SG', {
+              year: 'numeric', month: 'short', day: 'numeric',
+              hour: '2-digit', minute: '2-digit', second: '2-digit',
+              hour12: false,
+              timeZone: 'Asia/Singapore'
+            })            
+          });
+
+          // Save to file
+          fs.writeFileSync(nsfwLogsFile, JSON.stringify(nsfwLogs, null, 2), 'utf-8');
+
+        } catch (err) {
+          console.error("Failed to delete message or log violation:", err);
+        }
+        return; // Exit early after handling NSFW message
+      }
+
+  
+      // ✅ Continue with normal processing
+      if (message.content.startsWith('!')) return;
+  
+      const isDM = message.channel.type === ChannelType.DM;
+      const mentionPattern = new RegExp(`^<@!?${client.user.id}>(?:\\s+)?(generate|imagine)`, 'i');
+      const startsWithPattern = /^generate|^imagine/i;
+      const command = message.content.match(mentionPattern) || message.content.match(startsWithPattern);
+  
+      const shouldRespond = (
+        workInDMs && isDM ||
+        alwaysRespondChannels[message.channelId] ||
+        (message.mentions.users.has(client.user.id) && !isDM) ||
+        activeUsersInChannels[message.channelId]?.[message.author.id]
+      );
+  
+      if (shouldRespond) {
+        if (message.guild) {
+          initializeBlacklistForGuild(message.guild.id);
+          if (blacklistedUsers[message.guild.id].includes(message.author.id)) {
+            const embed = new EmbedBuilder()
+              .setColor(0xFF0000)
+              .setTitle('Blacklisted')
+              .setDescription('You are blacklisted and cannot use this bot.');
+            return message.reply({ embeds: [embed] });
+          }
+        }
+  
+        if (command) {
+          const prompt = message.content.slice(command.index + command[0].length).trim();
+          if (prompt) {
+            await genimg(prompt, message);
+          } else {
+            const embed = new EmbedBuilder()
+              .setColor(0x00FFFF)
+              .setTitle('Invalid Prompt')
+              .setDescription('Please provide a valid prompt.');
+            await message.channel.send({ embeds: [embed] });
+          }
+        } else if (activeRequests.has(message.author.id)) {
+          const embed = new EmbedBuilder()
+            .setColor(0xFFFF00)
+            .setTitle('Request In Progress')
+            .setDescription('Please wait until your previous action is complete.');
+          await message.reply({ embeds: [embed] });
         } else {
-          const embed = new EmbedBuilder()
-            .setColor(0x00FFFF)
-            .setTitle('Invalid Prompt')
-            .setDescription('Please provide a valid prompt.');
-          await message.channel.send({ embeds: [embed] });
+          await handleTextMessage(message);
         }
-      } else if (activeRequests.has(message.author.id)) {
-        const embed = new EmbedBuilder()
-          .setColor(0xFFFF00)
-          .setTitle('Request In Progress')
-          .setDescription('Please wait until your previous action is complete.');
-        await message.reply({ embeds: [embed] });
-      } else {
-        await handleTextMessage(message);
+      }
+    } catch (error) {
+      console.error('Error processing the message:', error);
+      if (activeRequests.has(message.author.id)) {
+        activeRequests.delete(message.author.id);
       }
     }
-  } catch (error) {
-    console.error('Error processing the message:', error);
-    if (activeRequests.has(message.author.id)) {
-      activeRequests.delete(message.author.id);
-    }
-  }
-});
+  });
+  
 
 client.on('interactionCreate', async (interaction) => {
   try {
@@ -633,7 +1000,16 @@ async function handleCommandInteraction(interaction) {
     help: handleManualCommand,
     alarm: handleAlarmCommand,
     view_alarms: handleViewAlarmsCommand,
-    delete_alarm: handleDeleteAlarmCommand
+    delete_alarm: handleDeleteAlarmCommand,
+    announce: handleAnnouncementCommand, // ✅ Ensure this is included, // ✅ Added announcement handler
+    removeannouncement: handleAnnouncementManagementCommand,  // ✅ Remove announcement handler
+    listannouncements: handleAnnouncementManagementCommand,   // ✅ List announcements handler
+    poll: handlePollCommand,            // ✅ Poll command handler
+    viewpolls: handleViewPollsCommand,
+    clearpolls: handleClearPollsCommand,
+    endpoll: handleEndPollCommand,      // ✅ End poll command handler
+    viewnsfwlogs: handleViewNSFWLogsCommand,
+    clearnsfwlogs: handleClearNSFWLogsCommand,
   };
 
   const handler = commandHandlers[interaction.commandName];
@@ -865,6 +1241,382 @@ async function handleQuestionsCommand(interaction) {
   });
 }
 
+
+//announce command handler
+async function handleAnnouncementCommand(interaction) {
+  let date = interaction.options.getString('date');
+  const time = interaction.options.getString('time');
+  const title = interaction.options.getString('title');
+  const message = interaction.options.getString('message');
+  const links = interaction.options.getString('links') || '';
+  let pingRole = interaction.options.getRole('ping_role'); // Use correct option name
+
+  // Check if the user has admin permissions
+    const member = interaction.member;
+    if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+      return await interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
+    }
+
+  // If date is not provided, use today's date
+  if (!date) {
+    const today = new Date();
+    date = today.toISOString().split('T')[0]; // Format as YYYY-MM-DD
+  }
+
+    // Handle @everyone and @here correctly
+    if (!pingRole) {
+      pingRole = '@everyone'; // Default to @everyone
+    } else if (pingRole.name === '@everyone' || pingRole.name === '@here') {
+      pingRole = pingRole.name; // Keep it as @everyone or @here (avoid <@&...>)
+    } else {
+      pingRole = `<@&${pingRole.id}>`; // Convert to role mention
+    }  
+
+  try {
+    await addAnnouncement({
+      guild: interaction.guild,
+      commandChannel: interaction.channel,
+      date,
+      time,
+      title,
+      message,
+      links,
+      pingRole, // Corrected
+    });
+
+    await interaction.reply({
+      content: `✅ An Announcement has been scheduled: **${title}** on **${date} at ${time}** for ${pingRole}.`,
+      ephemeral: true
+    });
+  } catch (error) {
+    await interaction.reply({
+      content: `❌ Error: ${error.message}`,
+      ephemeral: true
+    });
+  }
+}
+
+// Handling for removeannouncement, listannouncements, and checkannouncements
+async function handleAnnouncementManagementCommand(interaction) {
+  try {
+    await interaction.deferReply({ ephemeral: true }); // Defer to prevent interaction timeout
+
+    const { commandName, guildId } = interaction;
+
+    if (commandName === 'removeannouncement') {
+      const index = interaction.options.getInteger('index') - 1;
+      
+
+      if (index < 0 || index >= announcements.length) {
+        return await interaction.editReply({ content: '❌ Invalid index! Use `/listannouncements` to check valid indexes.' });
+      }
+
+      removeAnnouncement(index);
+      return await interaction.editReply({ content: `✅ Announcement at index ${index + 1} has been removed.` });
+
+    } else if (commandName === 'listannouncements') {
+      let guildAnnouncements = listAnnouncements(guildId);
+
+      // Remove duplicate announcements
+      const uniqueAnnouncements = [...new Map(guildAnnouncements.map(a => [a.title + a.date, a])).values()];
+
+      if (uniqueAnnouncements.length === 0) {
+        return await interaction.editReply({ content: '📢 No scheduled announcements.' });
+      } else {
+        // Map each announcement to include its title, scheduled date, and pingRole
+        const announcementList = uniqueAnnouncements
+        .map((a, i) => {
+          const originalDate = new Date(a.date);
+          // Add 8 hours (8 * 60 * 60 * 1000 ms)
+          const utcPlus8Date = new Date(originalDate.getTime() + 8 * 60 * 60 * 1000);
+          return `${i + 1}: **${a.title}** - ${utcPlus8Date.toLocaleString()} for ${a.pingRole}`;
+        })
+        
+          .join('\n');
+
+        return await interaction.editReply({ content: `**📌 Scheduled Announcements:**\n${announcementList}` });
+      }
+    }
+  } catch (error) {
+    console.error('Error handling interaction:', error);
+    if (!interaction.replied && !interaction.deferred) {
+      await interaction.reply({
+        content: `❌ Error: ${error.message}`,
+        flags: 64
+      });
+    }
+  }
+}
+
+//Poll command handler
+async function handlePollCommand(interaction) {
+      await interaction.deferReply();
+  
+      const question = interaction.options.getString('question');
+      const options = interaction.options.getString('options').split(',').map(opt => opt.trim());
+      const isAnonymous = interaction.options.getBoolean('anonymous') || false;
+  
+      if (options.length < 2 || options.length > 10) {
+        return interaction.editReply({ content: '❌ Please provide between 2 and 10 options.', ephemeral: true });
+      }
+  
+      const buttons = options.map((option, index) =>
+        new ButtonBuilder()
+          .setCustomId(`vote_${interaction.id}_${index}`)
+          .setLabel(option)
+          .setStyle(ButtonStyle.Primary)
+      );
+  
+      const row = new ActionRowBuilder().addComponents(buttons);
+      const pollMessage = await interaction.fetchReply();
+  
+      const pollEmbed = new EmbedBuilder()
+        .setColor(0x00FFFF)
+        .setTitle(`📊 Poll: ${question}`)
+        .setDescription(options.map((opt, i) => `**${i + 1}.** ${opt} - **0 votes**`).join('\n'))
+        .setFooter({ text: `Poll ID: ${pollMessage.id} • Created by ${interaction.user.tag}` });
+  
+      await interaction.editReply({ content: '', embeds: [pollEmbed], components: [row] });
+  
+      activePolls.set(pollMessage.id, {
+        question,
+        options,
+        votes: Array(options.length).fill(0),
+        voters: new Set(),
+        message: pollMessage,
+        creatorId: interaction.user.id,
+        anonymous: isAnonymous,
+        voteRecords: new Map() // Logs user votes
+      });
+  
+      savePollsToFile();
+    }
+    
+async function handleVoteButton(interaction) {
+  await interaction.deferUpdate(); // Acknowledge button interaction without modifying the message
+
+  const [action, pollId, optionIndex] = interaction.customId.split('_');
+
+  if (action !== 'vote' || !activePolls.has(interaction.message.id)) {
+    return interaction.followUp({ content: '❌ Poll not found or invalid button.', ephemeral: true });
+  }
+
+  const pollData = activePolls.get(interaction.message.id);
+
+  if (pollData.voters.has(interaction.user.id)) {
+    return interaction.followUp({ content: '❌ You have already voted in this poll!', ephemeral: true });
+  }
+
+  const index = parseInt(optionIndex);
+  if (isNaN(index) || index < 0 || index >= pollData.options.length) {
+    return interaction.followUp({ content: '❌ Invalid vote option.', ephemeral: true });
+  }
+
+  pollData.votes[index]++;
+  pollData.voters.add(interaction.user.id);
+
+  // Log vote (stores username → chosen option)
+  pollData.voteRecords.set(interaction.user.username, pollData.options[index]);
+
+  const updatedDescription = pollData.options.map((opt, i) =>
+    `**${i + 1}.** ${opt} - **${pollData.votes[i]} votes**`
+  ).join('\n');
+
+  const updatedEmbed = new EmbedBuilder()
+    .setColor(0x00FFFF)
+    .setTitle(`📊 Poll: ${pollData.question}`)
+    .setDescription(updatedDescription)
+    .setFooter({ text: `Poll ID: ${interaction.message.id} | Created by: ${pollData.creatorId}` });
+
+  try {
+    const pollMessage = await interaction.channel.messages.fetch(interaction.message.id);
+    await pollMessage.edit({ embeds: [updatedEmbed] });
+  } catch (error) {
+    console.error(`Failed to update poll message: ${interaction.message.id}`, error);
+    return interaction.followUp({ content: '❌ Failed to update poll results.', ephemeral: true });
+  }
+
+  // Send a separate private message to the user confirming their vote
+  await interaction.followUp({ content: '✅ Your vote has been counted!', ephemeral: true });
+}
+
+//view polls handler
+async function handleViewPollsCommand(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  const userId = interaction.user.id;
+
+  // Filter polls to only include those created by the user
+  const userPolls = Array.from(activePolls.values()).filter(poll => poll.creatorId === userId);
+
+  if (userPolls.length === 0) {
+    return interaction.editReply({ content: '❌ You have no active polls at the moment.', ephemeral: true });
+  }
+
+  const pollsList = userPolls.map(poll => {
+    let pollInfo = `📌 **${poll.question}** (Poll ID: \`${poll.message?.id || 'N/A'}\`)`;
+
+    // ✅ Show whether the poll is anonymous
+    pollInfo += `\n🔒 **Anonymous:** ${poll.anonymous ? 'Yes' : 'No'}`;
+
+    // ✅ Always show total votes per option
+    const voteSummary = poll.options.map((option, index) =>
+      `🔹 **${option}** → **${poll.votes[index]} votes**`
+    ).join('\n');
+
+    pollInfo += `\n📊 **Total Votes:**\n${voteSummary}`;
+
+    // ✅ Show voter details only if not anonymous
+    if (!poll.anonymous) {
+      const votes = [...poll.voteRecords.entries()]
+        .map(([user, choice]) => `👤 **${user}** → 🗳 **${choice}**`)
+        .join('\n');
+
+      pollInfo += `\n🔍 **Voter Details:**\n${votes || 'No votes yet.'}`;
+    }
+
+    return pollInfo;
+  }).join('\n\n');
+
+  const pollsEmbed = new EmbedBuilder()
+    .setColor(0x00FFFF)
+    .setTitle('📋 Your Active Polls')
+    .setDescription(pollsList)
+    .setFooter({ text: `Requested by: ${interaction.user.username}` });
+
+  await interaction.editReply({ embeds: [pollsEmbed] });
+}
+
+//clear polls handler
+async function handleClearPollsCommand(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  if (activePolls.size === 0) {
+    return interaction.editReply({ content: '❌ No active polls to clear.', ephemeral: true });
+  }
+
+  // Clear active polls from memory
+  activePolls.clear();
+  savePollsToFile(); // Persist changes
+
+  const embed = new EmbedBuilder()
+    .setColor(0xFF0000)
+    .setTitle('🗑️ All Polls Cleared')
+    .setDescription('All active polls have been removed.')
+    .setFooter({ text: `Cleared by: ${interaction.user.username}` });
+
+  await interaction.editReply({ embeds: [embed] });
+}
+
+//end polls handler
+async function handleEndPollCommand(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  const pollId = interaction.options.getString('poll_id');
+
+  if (!activePolls.has(pollId)) {
+    return interaction.editReply({ content: '❌ No active poll found with that ID!', ephemeral: true });
+  }
+
+  const pollData = activePolls.get(pollId);
+
+  if (interaction.user.id !== pollData.creatorId) {
+    return interaction.editReply({ content: '❌ Only the poll creator can end this poll.', ephemeral: true });
+  }
+
+  const finalResults = pollData.options.map((opt, i) =>
+    `**${i + 1}.** ${opt} - **${pollData.votes[i]} votes**`
+  ).join('\n');
+
+  const finalEmbed = new EmbedBuilder()
+    .setColor(0xFF0000)
+    .setTitle(`📊 Poll Ended: ${pollData.question}`)
+    .setDescription(finalResults)
+    .setFooter({ text: `Poll ID: ${pollId} | Ended by: ${interaction.user.username}` });
+
+    try {
+      const channel = interaction.channel; // Ensure the bot has access to the channel
+      const pollMessage = await channel.messages.fetch(pollId); // Fetch the poll message by ID
+    
+      if (pollMessage) {
+        await pollMessage.edit({ embeds: [finalEmbed], components: [] });
+      } else {
+        console.warn(`Poll message for ID ${pollId} is not found.`);
+      }
+
+    // Remove poll from active memory
+    activePolls.delete(pollId);
+    savePollsToFile(); // Ensure persistence if using file storage
+
+    await interaction.editReply({ content: '✅ Poll has been ended!', ephemeral: true });
+  } catch (error) {
+    console.error(`Failed to update poll message: ${pollId}`, error);
+    return interaction.editReply({ content: '❌ Failed to end the poll. Please try again later.', ephemeral: true });
+  }
+}
+
+async function handleViewNSFWLogsCommand(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  // ✅ Check if the user has ADMINISTRATOR permission
+  const member = interaction.member;
+  if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+    return interaction.editReply({
+      content: '❌ You do not have permission to view NSFW violation logs.',
+    });
+  }
+
+  if (nsfwLogs.length === 0) {
+    return interaction.editReply({ content: '✅ No NSFW violations have been logged yet.' });
+  }
+
+  const logsList = nsfwLogs.map((log, index) =>
+    `**${index + 1}.** 👤 ${log.username} • 📝 "${log.word}" • 🕒 ${log.timestamp}`
+  ).join('\n');
+
+  const embed = new EmbedBuilder()
+    .setColor(0xFF5E5E)
+    .setTitle('🚨 NSFW Word Violation Logs')
+    .setDescription(logsList.length > 4000 ? logsList.slice(0, 3997) + '...' : logsList)
+    .setFooter({ text: `Requested by: ${interaction.user.username}` });
+
+  await interaction.editReply({ embeds: [embed] });
+}
+
+async function handleClearNSFWLogsCommand(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  // ✅ Check if the user has ADMINISTRATOR permission
+  const member = interaction.member;
+  if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+    return interaction.editReply({
+      content: '❌ You do not have permission to clear NSFW violation logs.',
+    });
+  }
+
+  // Clear in-memory logs
+  nsfwLogs = [];
+
+  // Clear persisted file
+  try {
+    fs.writeFileSync(nsfwLogsFile, JSON.stringify([], null, 2), 'utf-8');
+  } catch (error) {
+    console.error('⚠️ Failed to clear NSFW logs file:', error);
+    return interaction.editReply({
+      content: '❌ Failed to clear logs from file system.',
+    });
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor(0x00FF7F)
+    .setTitle('✅ NSFW Logs Cleared')
+    .setDescription('All NSFW word violation logs have been successfully cleared.')
+    .setFooter({ text: `Action performed by: ${interaction.user.username}` });
+
+  await interaction.editReply({ embeds: [embed] });
+}
+
+
 async function handleManualCommand(interaction) {
   const embed = new EmbedBuilder()
     .setColor(0x00FFFF)
@@ -876,6 +1628,11 @@ async function handleManualCommand(interaction) {
 
 async function handleButtonInteraction(interaction) {
   if (!interaction.isButton()) return;
+
+  // ✅ Handle Poll Voting First
+  if (interaction.customId.startsWith('vote_')) {
+    return await handleVoteButton(interaction);
+  }
 
   if (interaction.guild) {
     initializeBlacklistForGuild(interaction.guild.id);
@@ -3352,9 +4109,24 @@ const manual = `
 
 5.Functions Commands
 /alarm [date time message]: Generates an alarm for the user.
+/announcement [date] [time] [title] [message] [links (optional)]: Schedule an announcement to be sent at a specified date and time.
 /view_alarms: Allow users to view their alarms.
 /delete_alarm [number]: Allow users to delete their alarms.
 /notify [message] [time]: bot sets a notification for an event
 `;
 
 client.login(token);
+
+process.on('SIGINT', () => {
+  console.log("Bot shutting down...");
+  process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+  console.log("Bot terminated...");
+  process.exit(0);
+});
+
+process.on('unhandledRejection', error => {
+  console.error('Unhandled promise rejection:', error);
+});
