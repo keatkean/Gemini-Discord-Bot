@@ -1,5 +1,5 @@
 import dotenv from 'dotenv';
-const result = dotenv.config({ path: './example.env' });  // Specify the correct path to the file
+const result = dotenv.config({ path: './.env' });  // Specify the correct path to the file
 if (result.error) {
   console.error("Error loading .env file:", result.error);
 } else {
