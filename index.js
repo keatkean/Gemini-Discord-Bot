@@ -841,14 +841,14 @@ try {
 
   client.user.setPresence({
     activities: [activities[activityIndex]],
-    status: 'idle',
+    status: 'online',
   });
 
   setInterval(() => {
     activityIndex = (activityIndex + 1) % activities.length;
     client.user.setPresence({
       activities: [activities[activityIndex]],
-      status: 'idle',
+      status: 'online',
     });
   }, 30000);
 });
