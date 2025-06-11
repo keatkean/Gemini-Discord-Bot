@@ -142,7 +142,7 @@ const commands = [
   },
   {
     "name": "help",
-    "description": "PEM PAL Manual"
+    "description": "Available Commands"
   },
   {
     "name": "alarm",
